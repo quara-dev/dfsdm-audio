@@ -1,0 +1,19 @@
+# Linker flags for Windows cross-compilation (x86_64-pc-windows-gnu).
+#
+# Goal: produce a standalone .exe that does NOT depend on:
+#   libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-1.dll
+# Those DLLs ship with MinGW / MSYS2 but are absent on a bare Windows install,
+# causing the process to exit immediately with a missing-DLL dialog.
+#
+# The three flags below statically bake the runtimes into the binary:
+#   -static-libgcc    — folds libgcc_s into the .exe
+#   -static-libstdc++ — folds libstdc++ into the .exe (Rust C++ glue / panic)
+#   -Wl,-Bstatic,-lwinpthread,-Bdynamic
+#                     — statically links libwinpthread, then restores dynamic
+#                       mode for the remaining system libraries (kernel32, etc.)
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-C", "link-arg=-static-libgcc",
+    "-C", "link-arg=-static-libstdc++",
+    "-C", "link-arg=-Wl,-Bstatic,-lwinpthread,-Bdynamic",
+]

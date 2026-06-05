@@ -42,10 +42,10 @@ void MX_DFSDM1_Init(void)
   hdfsdm1_filter1.Instance = DFSDM1_Filter1;
   hdfsdm1_filter1.Init.RegularParam.Trigger = DFSDM_FILTER_SW_TRIGGER;
   hdfsdm1_filter1.Init.RegularParam.FastMode = DISABLE;
-  hdfsdm1_filter1.Init.RegularParam.DmaMode = DISABLE;
+  hdfsdm1_filter1.Init.RegularParam.DmaMode = ENABLE;
   hdfsdm1_filter1.Init.FilterParam.SincOrder = DFSDM_FILTER_SINC5_ORDER;
-  hdfsdm1_filter1.Init.FilterParam.Oversampling = 1;
-  hdfsdm1_filter1.Init.FilterParam.IntOversampling = 1;
+  hdfsdm1_filter1.Init.FilterParam.Oversampling = 50;
+  hdfsdm1_filter1.Init.FilterParam.IntOversampling = 2;
   if (HAL_DFSDM_FilterInit(&hdfsdm1_filter1) != HAL_OK)
   {
     Error_Handler();
@@ -53,16 +53,16 @@ void MX_DFSDM1_Init(void)
   hdfsdm1_channel1.Instance = DFSDM1_Channel1;
   hdfsdm1_channel1.Init.OutputClock.Activation = ENABLE;
   hdfsdm1_channel1.Init.OutputClock.Selection = DFSDM_CHANNEL_OUTPUT_CLOCK_AUDIO;
-  hdfsdm1_channel1.Init.OutputClock.Divider = 2;
+  hdfsdm1_channel1.Init.OutputClock.Divider = 10;
   hdfsdm1_channel1.Init.Input.Multiplexer = DFSDM_CHANNEL_EXTERNAL_INPUTS;
   hdfsdm1_channel1.Init.Input.DataPacking = DFSDM_CHANNEL_STANDARD_MODE;
   hdfsdm1_channel1.Init.Input.Pins = DFSDM_CHANNEL_SAME_CHANNEL_PINS;
-  hdfsdm1_channel1.Init.SerialInterface.Type = DFSDM_CHANNEL_SPI_RISING;
+  hdfsdm1_channel1.Init.SerialInterface.Type = DFSDM_CHANNEL_SPI_FALLING;
   hdfsdm1_channel1.Init.SerialInterface.SpiClock = DFSDM_CHANNEL_SPI_CLOCK_INTERNAL;
   hdfsdm1_channel1.Init.Awd.FilterOrder = DFSDM_CHANNEL_FASTSINC_ORDER;
   hdfsdm1_channel1.Init.Awd.Oversampling = 1;
   hdfsdm1_channel1.Init.Offset = 0;
-  hdfsdm1_channel1.Init.RightBitShift = 0x00;
+  hdfsdm1_channel1.Init.RightBitShift = 7;
   if (HAL_DFSDM_ChannelInit(&hdfsdm1_channel1) != HAL_OK)
   {
     Error_Handler();
@@ -143,8 +143,8 @@ void HAL_DFSDM_FilterMspInit(DFSDM_Filter_HandleTypeDef* dfsdm_filterHandle)
     hdma_dfsdm1_flt1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
     hdma_dfsdm1_flt1.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
     hdma_dfsdm1_flt1.Init.Mode = DMA_CIRCULAR;
-    hdma_dfsdm1_flt1.Init.Priority = DMA_PRIORITY_LOW;
-    hdma_dfsdm1_flt1.Init.FIFOMode = DMA_FIFOMODE_ENABLE;
+    hdma_dfsdm1_flt1.Init.Priority = DMA_PRIORITY_HIGH;
+    hdma_dfsdm1_flt1.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     hdma_dfsdm1_flt1.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_HALFFULL;
     hdma_dfsdm1_flt1.Init.MemBurst = DMA_MBURST_SINGLE;
     hdma_dfsdm1_flt1.Init.PeriphBurst = DMA_PBURST_SINGLE;

@@ -1,3 +1,13 @@
 build
 mx.scratch
 !.settings
+
+# ARM GCC toolchains (large binaries, downloaded separately)
+toolchain/
+toolchain_win/
+
+# IDE / editor caches
+.cache/
+
+# Rust build artifacts
+tools/dfsdm-viz/target/

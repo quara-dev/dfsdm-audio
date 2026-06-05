@@ -20,7 +20,6 @@
 #include "main.h"
 #include "dfsdm.h"
 #include "dma.h"
-#include "sai.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -47,7 +46,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+#define AUDIO_BUFFER_SIZE 2048
+/* Buffer MUST be in DMA-accessible RAM (RAM_D1 / AXI SRAM).
+ * DTCMRAM (default .bss location) is CPU-only: DMA controllers cannot reach
+ * it via the AHB bus matrix, so no DMA callbacks would ever fire. */
+__attribute__((section(".DMA_Buffer"))) int16_t audioBuffer[AUDIO_BUFFER_SIZE];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,7 +63,32 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+extern UART_HandleTypeDef huart4;
+extern DFSDM_Filter_HandleTypeDef hdfsdm1_filter1;
+/* audioBuffer lives in RAM_D1 (.DMA_Buffer section) — DMA-accessible */
+extern __attribute__((section(".DMA_Buffer"))) int16_t audioBuffer[];
 
+/* 4-byte sync word sent before every burst so the host can (re-)align.
+ * Defined as a byte array to be endianness-independent. */
+static const uint8_t AUDIO_SYNC[4] = {0xAA, 0x55, 0xAA, 0x55};
+
+void HAL_DFSDM_FilterRegConvHalfCpltCallback(DFSDM_Filter_HandleTypeDef *hdfsdm_filter)
+{
+  if (hdfsdm_filter == &hdfsdm1_filter1)
+  {
+    HAL_UART_Transmit(&huart4, AUDIO_SYNC, sizeof(AUDIO_SYNC), HAL_MAX_DELAY);
+    HAL_UART_Transmit(&huart4, (uint8_t*)&audioBuffer[0], (AUDIO_BUFFER_SIZE / 2) * sizeof(int16_t), HAL_MAX_DELAY);
+  }
+}
+
+void HAL_DFSDM_FilterRegConvCpltCallback(DFSDM_Filter_HandleTypeDef *hdfsdm_filter)
+{
+  if (hdfsdm_filter == &hdfsdm1_filter1)
+  {
+    HAL_UART_Transmit(&huart4, AUDIO_SYNC, sizeof(AUDIO_SYNC), HAL_MAX_DELAY);
+    HAL_UART_Transmit(&huart4, (uint8_t*)&audioBuffer[AUDIO_BUFFER_SIZE / 2], (AUDIO_BUFFER_SIZE / 2) * sizeof(int16_t), HAL_MAX_DELAY);
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -100,10 +128,16 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_DFSDM1_Init();
-  MX_SAI1_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
+  /* Startup banner — if this appears on the host, UART is alive */
+  static const char banner[] = "DFSDM audio ready\r\n";
+  HAL_UART_Transmit(&huart4, (uint8_t*)banner, sizeof(banner) - 1, HAL_MAX_DELAY);
 
+  if (HAL_DFSDM_FilterRegularMsbStart_DMA(&hdfsdm1_filter1, audioBuffer, AUDIO_BUFFER_SIZE) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,43 +160,50 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-  */
+  /* Supply: Direct SMPS */
   HAL_PWREx_ConfigSupply(PWR_DIRECT_SMPS_SUPPLY);
 
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  /* VOS2: supports up to 300 MHz SYSCLK / 150 MHz AHB */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
 
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  /* HSE on, HSI on (default), PLL1 from HSE
+   * PLL1: M=24 -> VCO_in=1MHz (VCIRANGE_0), N=288 -> VCO=288MHz (VCOMEDIUM),
+   *        P=1 -> SYSCLK=288MHz, Q=6 -> 48MHz, R=6 -> 48MHz */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 24;
+  RCC_OscInitStruct.PLL.PLLN = 288;
+  RCC_OscInitStruct.PLL.PLLP = 1;
+  RCC_OscInitStruct.PLL.PLLQ = 6;
+  RCC_OscInitStruct.PLL.PLLR = 6;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_0;
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOMEDIUM;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  /* SYSCLK=PLL1_P=288MHz, D1CPRE=/1 (CPU=288MHz), HPRE=/2 (AXI/AHB=144MHz),
+   * APBx prescalers /2 -> 72MHz; FLASH_LATENCY_2 for AXI=144MHz at VOS2 */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2
+                              | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -177,10 +218,19 @@ void PeriphCommonClock_Config(void)
 {
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
-  /** Initializes the peripherals clock
-  */
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_CKPER;
-  PeriphClkInitStruct.CkperClockSelection = RCC_CLKPSOURCE_HSI;
+  /* PLL3: M=24 -> VCO_in=1MHz (VCIRANGE_0), N=320 -> VCO=320MHz (VCOMEDIUM),
+   *        P=10 -> PLL3_P=32MHz (DFSDM audio CKOUT via SAI1 source),
+   *        Q=4  -> PLL3_Q=80MHz, R=16 -> PLL3_R=20MHz */
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SAI1;
+  PeriphClkInitStruct.Sai1ClockSelection = RCC_SAI1CLKSOURCE_PLL3;
+  PeriphClkInitStruct.PLL3.PLL3M = 24;
+  PeriphClkInitStruct.PLL3.PLL3N = 320;
+  PeriphClkInitStruct.PLL3.PLL3P = 10;
+  PeriphClkInitStruct.PLL3.PLL3Q = 4;
+  PeriphClkInitStruct.PLL3.PLL3R = 16;
+  PeriphClkInitStruct.PLL3.PLL3RGE = RCC_PLL3VCIRANGE_0;
+  PeriphClkInitStruct.PLL3.PLL3VCOSEL = RCC_PLL3VCOMEDIUM;
+  PeriphClkInitStruct.PLL3.PLL3FRACN = 0;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();

@@ -1,0 +1,54 @@
+[package]
+name = "dfsdm-viz"
+version = "0.2.0"
+edition = "2021"
+description = "Real-time DFSDM audio visualiser for dfsdm-audio firmware"
+
+[[bin]]
+name = "dfsdm-viz"
+path = "src/main.rs"
+
+[dependencies]
+# Serial port access – cross-platform (Windows + Linux).
+# Default features include udev-based port enumeration on Linux
+# (requires libudev-dev at build time, libdbus-1 at runtime).
+serialport = "4"
+
+# GUI – glow backend works on Windows (OpenGL) and Linux (OpenGL/X11/Wayland)
+eframe = { version = "0.27", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "x11",
+    "wayland",
+] }
+egui      = "0.27"
+egui_plot = "0.27"
+
+# Concurrency
+crossbeam-channel = "0.5"
+
+# CLI args
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+log        = "0.4"
+env_logger = "0.11"
+
+# Native file/folder picker (Browse button)
+rfd = "0.14"
+
+# Timestamps for WAV filenames
+chrono = "0.4"
+
+# FFT for toolbox algorithms (Welch PSD, spectrogram, etc.)
+rustfft = "6"
+
+# WAV file recording
+hound = "3"
+
+[profile.dev]
+incremental = false
+
+[profile.release]
+opt-level   = 3
+incremental = false
