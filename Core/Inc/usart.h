@@ -33,6 +33,8 @@ extern "C" {
 /* USER CODE END Includes */
 
 extern UART_HandleTypeDef huart4;
+/* TX DMA handle — needed by stm32h7xx_it.c for the DMA1_Stream1 ISR */
+extern DMA_HandleTypeDef  hdma_uart4_tx;
 
 /* USER CODE BEGIN Private defines */
 

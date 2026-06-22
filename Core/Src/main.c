@@ -25,7 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>   /* memcpy — used in DFSDM DMA callbacks */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,11 +46,38 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-#define AUDIO_BUFFER_SIZE 2048
-/* Buffer MUST be in DMA-accessible RAM (RAM_D1 / AXI SRAM).
- * DTCMRAM (default .bss location) is CPU-only: DMA controllers cannot reach
- * it via the AHB bus matrix, so no DMA callbacks would ever fire. */
+
+/* ---------------------------------------------------------------------------
+ * Buffer sizing — all values derived from DFSDM output rate = 32 000 Hz
+ *
+ *   AUDIO_BUFFER_SIZE  : total circular DMA buffer (int16_t samples)
+ *   AUDIO_HALF_SIZE    : samples delivered per DMA half/full callback
+ *   UART_TX_PKT_SIZE   : bytes in one UART burst  = 4-byte sync + audio bytes
+ *
+ * At 512 total / 256 per half:
+ *   fill window  = 256 / 32 000  = 8.0 ms
+ *   TX time      = 516 B × 10 b / 921 600 baud ≈ 5.6 ms
+ *   margin       = 8.0 − 5.6    = 2.4 ms  ← comfortable for DMA-to-DMA
+ *
+ * To match quara-firmware exactly (64 total / 32 per half = 1 ms window,
+ * 0.74 ms TX, 0.26 ms margin) change AUDIO_BUFFER_SIZE to 64.
+ * ---------------------------------------------------------------------------
+ */
+#define AUDIO_BUFFER_SIZE   512U
+#define AUDIO_HALF_SIZE     (AUDIO_BUFFER_SIZE / 2U)                /* 256 samples  */
+#define UART_TX_PKT_SIZE    (4U + AUDIO_HALF_SIZE * sizeof(int16_t))/* 516 bytes    */
+
+/* DFSDM circular DMA buffer — must live in AXI SRAM (D1 domain, DMA-reachable).
+ * DTCMRAM (.bss default) is CPU-only and unreachable by DMA bus masters.        */
 __attribute__((section(".DMA_Buffer"))) int16_t audioBuffer[AUDIO_BUFFER_SIZE];
+
+/* Ping-pong UART TX packets, also in AXI SRAM so UART4 TX DMA can read them.
+ * Layout per packet: [0xAA,0x55,0xAA,0x55][256 × int16_t in little-endian]
+ * The sync header is written once at init; audio bytes are overwritten every
+ * callback by a ~0.4 µs memcpy before the UART TX DMA is kicked off.           */
+__attribute__((section(".DMA_Buffer"))) static uint8_t uart_tx_ping[UART_TX_PKT_SIZE];
+__attribute__((section(".DMA_Buffer"))) static uint8_t uart_tx_pong[UART_TX_PKT_SIZE];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -65,28 +92,55 @@ static void MPU_Config(void);
 /* USER CODE BEGIN 0 */
 extern UART_HandleTypeDef huart4;
 extern DFSDM_Filter_HandleTypeDef hdfsdm1_filter1;
-/* audioBuffer lives in RAM_D1 (.DMA_Buffer section) — DMA-accessible */
-extern __attribute__((section(".DMA_Buffer"))) int16_t audioBuffer[];
 
-/* 4-byte sync word sent before every burst so the host can (re-)align.
- * Defined as a byte array to be endianness-independent. */
-static const uint8_t AUDIO_SYNC[4] = {0xAA, 0x55, 0xAA, 0x55};
+/* ---------------------------------------------------------------------------
+ * DMA-to-DMA audio pipeline
+ *
+ *  1. DFSDM → DMA1_Stream0 fills audioBuffer[512] in circular mode (int16_t).
+ *  2. On each half/full DMA callback (every 8 ms @ 32 kHz):
+ *       a. memcpy the stable half into the correct ping or pong TX packet
+ *          (audio bytes start at offset 4, after the pre-filled sync header).
+ *       b. HAL_UART_Transmit_DMA kicks off DMA1_Stream1 to stream the 516-byte
+ *          packet to UART4 — returns immediately, CPU stays free.
+ *  3. The two DMA engines run concurrently: DFSDM fills the OTHER half while
+ *     UART ships the completed half.
+ *
+ *  Timing (32 kHz, 921 600 baud, 8N1):
+ *    half-buffer fill  = 256 / 32 000 = 8.0 ms
+ *    UART TX           = 516 × 10 / 921 600 ≈ 5.6 ms
+ *    margin            = 2.4 ms
+ * ---------------------------------------------------------------------------
+ */
 
+/* Called from DMA1_Stream0 ISR when DFSDM DMA has filled the FIRST half.
+ * audioBuffer[0 .. AUDIO_HALF_SIZE-1] is now stable.                       */
 void HAL_DFSDM_FilterRegConvHalfCpltCallback(DFSDM_Filter_HandleTypeDef *hdfsdm_filter)
 {
   if (hdfsdm_filter == &hdfsdm1_filter1)
   {
-    HAL_UART_Transmit(&huart4, AUDIO_SYNC, sizeof(AUDIO_SYNC), HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart4, (uint8_t*)&audioBuffer[0], (AUDIO_BUFFER_SIZE / 2) * sizeof(int16_t), HAL_MAX_DELAY);
+    /* Stage audio into ping packet (sync header already in place at [0..3]) */
+    memcpy(&uart_tx_ping[4], &audioBuffer[0],
+           AUDIO_HALF_SIZE * sizeof(int16_t));
+
+    /* Launch UART TX DMA — non-blocking, returns immediately.
+     * If the previous TX is somehow still in progress HAL returns HAL_BUSY
+     * and we silently drop this burst (should not happen with 2.4 ms margin). */
+    (void)HAL_UART_Transmit_DMA(&huart4, uart_tx_ping,
+                                 (uint16_t)UART_TX_PKT_SIZE);
   }
 }
 
+/* Called from DMA1_Stream0 ISR when DFSDM DMA has filled the SECOND half.
+ * audioBuffer[AUDIO_HALF_SIZE .. AUDIO_BUFFER_SIZE-1] is now stable.       */
 void HAL_DFSDM_FilterRegConvCpltCallback(DFSDM_Filter_HandleTypeDef *hdfsdm_filter)
 {
   if (hdfsdm_filter == &hdfsdm1_filter1)
   {
-    HAL_UART_Transmit(&huart4, AUDIO_SYNC, sizeof(AUDIO_SYNC), HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart4, (uint8_t*)&audioBuffer[AUDIO_BUFFER_SIZE / 2], (AUDIO_BUFFER_SIZE / 2) * sizeof(int16_t), HAL_MAX_DELAY);
+    memcpy(&uart_tx_pong[4], &audioBuffer[AUDIO_HALF_SIZE],
+           AUDIO_HALF_SIZE * sizeof(int16_t));
+
+    (void)HAL_UART_Transmit_DMA(&huart4, uart_tx_pong,
+                                 (uint16_t)UART_TX_PKT_SIZE);
   }
 }
 /* USER CODE END 0 */
@@ -130,11 +184,23 @@ int main(void)
   MX_DFSDM1_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
-  /* Startup banner — if this appears on the host, UART is alive */
+  /* Pre-fill the 4-byte sync header in both TX packets once at startup.
+   * The pattern 0xAA 0x55 0xAA 0x55 lets the host detect and re-align
+   * frame boundaries robustly (alternating bit pattern, not a valid int16). */
+  uart_tx_ping[0] = uart_tx_pong[0] = 0xAAU;
+  uart_tx_ping[1] = uart_tx_pong[1] = 0x55U;
+  uart_tx_ping[2] = uart_tx_pong[2] = 0xAAU;
+  uart_tx_ping[3] = uart_tx_pong[3] = 0x55U;
+
+  /* Startup banner — confirms UART4 is alive before first audio packet */
   static const char banner[] = "DFSDM audio ready\r\n";
   HAL_UART_Transmit(&huart4, (uint8_t*)banner, sizeof(banner) - 1, HAL_MAX_DELAY);
 
-  if (HAL_DFSDM_FilterRegularMsbStart_DMA(&hdfsdm1_filter1, audioBuffer, AUDIO_BUFFER_SIZE) != HAL_OK)
+  /* Start DFSDM circular DMA.  Half/full callbacks will fire automatically
+   * every 8 ms and chain the UART TX DMA without further CPU involvement.  */
+  if (HAL_DFSDM_FilterRegularMsbStart_DMA(&hdfsdm1_filter1,
+                                           audioBuffer,
+                                           AUDIO_BUFFER_SIZE) != HAL_OK)
   {
     Error_Handler();
   }
@@ -147,6 +213,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* All data flow is DMA-driven.
+     * DFSDM DMA fills audioBuffer; half/full callbacks fire every 8 ms and
+     * immediately chain UART4 TX DMA — CPU stays idle here.               */
   }
   /* USER CODE END 3 */
 }

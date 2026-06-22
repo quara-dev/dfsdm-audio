@@ -41,7 +41,7 @@ void MX_DFSDM1_Init(void)
   /* USER CODE END DFSDM1_Init 1 */
   hdfsdm1_filter1.Instance = DFSDM1_Filter1;
   hdfsdm1_filter1.Init.RegularParam.Trigger = DFSDM_FILTER_SW_TRIGGER;
-  hdfsdm1_filter1.Init.RegularParam.FastMode = DISABLE;
+  hdfsdm1_filter1.Init.RegularParam.FastMode = DISABLE; /* IOSR=2 → output = CKOUT/(OSR×IOSR) = 32 kHz; FastMode=ENABLE ignores IOSR, doubles rate to 64 kHz which breaks timing */
   hdfsdm1_filter1.Init.RegularParam.DmaMode = ENABLE;
   hdfsdm1_filter1.Init.FilterParam.SincOrder = DFSDM_FILTER_SINC5_ORDER;
   hdfsdm1_filter1.Init.FilterParam.Oversampling = 50;

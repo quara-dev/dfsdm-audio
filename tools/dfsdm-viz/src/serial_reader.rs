@@ -1,6 +1,6 @@
 /// Wire-protocol constants (must match firmware `main.c`).
 const SYNC: [u8; 4] = [0xAA, 0x55, 0xAA, 0x55];
-const BURST_SAMPLES: usize = 1024;
+const BURST_SAMPLES: usize = 256;            // = AUDIO_HALF_SIZE in firmware (AUDIO_BUFFER_SIZE/2)
 const BURST_BYTES: usize = BURST_SAMPLES * 2; // i16 LE
 
 /// Stateful sync-frame parser for the DFSDM audio UART protocol.

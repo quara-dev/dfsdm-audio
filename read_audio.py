@@ -4,7 +4,7 @@ read_audio.py  –  Real-time audio monitor for dfsdm-audio firmware.
 
 Wire format (sent by firmware per DMA half/full callback):
     [0xAA 0x55 0xAA 0x55]  – 4-byte sync word
-    [int16_LE × CHUNK]     – 1024 little-endian signed-16 samples  (2048 bytes)
+    [int16_LE × CHUNK]     – 256 little-endian signed-16 samples  (512 bytes)
 
 Usage:
     python read_audio.py <port>
@@ -27,7 +27,7 @@ import serial
 
 # ── protocol constants (must match firmware) ───────────────────────────────────
 SYNC  = b'\xAA\x55\xAA\x55'
-CHUNK = 1024                    # samples per burst  (AUDIO_BUFFER_SIZE / 2)
+CHUNK = 256                     # samples per burst  (AUDIO_BUFFER_SIZE / 2)
 
 # ── defaults ───────────────────────────────────────────────────────────────────
 BAUD         = 921600

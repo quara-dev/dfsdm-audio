@@ -91,7 +91,7 @@ fn clamp_view_to_history(x_min: f64, x_max: f64, t_s: f64, history_s: f64) -> (f
     let oldest = (t_s - history_s).max(0.0);
     let span   = (newest - oldest).max(1e-6);
 
-    let mut width = (x_max - x_min).max(1e-6).min(span);
+    let width = (x_max - x_min).max(1e-6).min(span);
     let mut lo = x_min;
     let mut hi = x_max;
 
@@ -106,7 +106,6 @@ fn clamp_view_to_history(x_min: f64, x_max: f64, t_s: f64, history_s: f64) -> (f
     if hi > newest {
         hi = newest;
     }
-    let _ = &mut width;
     (lo, hi)
 }
 ```
