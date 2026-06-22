@@ -90,6 +90,11 @@ pub struct DfsdmApp {
     audio_display: AudioDisplay,
     y_scale:       f64,
 
+    // ── View navigation ─────────────────────────────────────────────────────
+    follow:       bool,        // true = live auto-scroll; false = paused/navigating
+    view_width_s: f64,         // current time-window width
+    last_x_range: (f64, f64),  // previous frame's visible X, drives this frame's query
+
     // ── WAV recording ───────────────────────────────────────────────────────
     wav:        WavRecorder,
     wav_folder: String,
@@ -146,6 +151,9 @@ impl DfsdmApp {
             rms_smooth:        0.0,
             audio_display:     AudioDisplay::Both,
             y_scale:           0.0,
+            follow:            true,
+            view_width_s:      WINDOW_S,
+            last_x_range:      (0.0, WINDOW_S),
             wav:               WavRecorder::new(),
             wav_folder:        String::new(),
             wav_status:        String::new(),
@@ -164,6 +172,18 @@ impl DfsdmApp {
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
+
+    /// Toggle between live-follow and paused navigation.
+    /// Pausing freezes at the current view (held in `last_x_range`).
+    /// Going live resets the window width to the default and re-arms auto-scroll.
+    fn toggle_follow(&mut self) {
+        if self.follow {
+            self.follow = false;
+        } else {
+            self.follow = true;
+            self.view_width_s = WINDOW_S;
+        }
+    }
 
     fn do_connect_to(&mut self, port: &str) {
         self.port_connected = port.to_string();
@@ -410,6 +430,28 @@ impl DfsdmApp {
 
             ui.separator();
 
+            // --- Pause / Go Live ----------------------------------------
+            if self.follow {
+                if ui.button("⏸ Pause").on_hover_text("Freeze view (Space)").clicked() {
+                    self.toggle_follow();
+                }
+            } else {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("▶ Go Live").color(Color32::from_rgb(0, 200, 100)),
+                    ))
+                    .on_hover_text("Resume live scroll (Space)")
+                    .clicked()
+                {
+                    self.toggle_follow();
+                }
+                ui.label(
+                    egui::RichText::new("PAUSED").color(Color32::from_rgb(255, 180, 0)),
+                );
+            }
+
+            ui.separator();
+
             // --- WAV recording ------------------------------------------
             {
                 let rec = self.wav.is_recording();
@@ -552,12 +594,21 @@ impl eframe::App for DfsdmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_events();
 
-        // ── Compute visible window ─────────────────────────────────────────
-        let now_s     = self.t_s.max(WINDOW_S);
-        let win_start = now_s - WINDOW_S;
+        // ── Spacebar toggles pause/live ────────────────────────────────────
+        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.toggle_follow();
+        }
 
-        let raw_vis = Self::visible_window_range(&self.raw_buf, win_start, now_s);
-        let hpf_vis = Self::visible_window_range(&self.hpf_buf, win_start, now_s);
+        // ── Resolve the visible X range ────────────────────────────────────
+        let now_s = self.t_s.max(WINDOW_S);
+        let (x_min, x_max) = if self.follow {
+            (now_s - self.view_width_s, now_s)
+        } else {
+            clamp_view_to_history(self.last_x_range.0, self.last_x_range.1, self.t_s, HISTORY_S)
+        };
+
+        let raw_vis = Self::visible_window_range(&self.raw_buf, x_min, x_max);
+        let hpf_vis = Self::visible_window_range(&self.hpf_buf, x_min, x_max);
 
         // Compute means once; reused by update_y_scale AND decimate_for_plot.
         let raw_mean = Self::mean(&raw_vis);
@@ -582,8 +633,8 @@ impl eframe::App for DfsdmApp {
                             ui,
                             &raw_vis,
                             &hpf_vis,
-                            win_start,
-                            now_s,
+                            x_min,
+                            x_max,
                         );
                     });
                 });
@@ -591,19 +642,44 @@ impl eframe::App for DfsdmApp {
 
         // ── Waveform plot ──────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Decimate for GPU — mean-centred (means computed above)
-            let raw_pts = Self::decimate_for_plot(&raw_vis, raw_mean);
-            let hpf_pts = Self::decimate_for_plot(&hpf_vis, hpf_mean);
-
             Plot::new("audio_wave")
                 .show_axes(true)
                 .show_grid(true)
+                .allow_drag([true, false])
+                .allow_zoom([true, false])
+                .allow_scroll(true)
+                .allow_boxed_zoom(false)
                 .label_formatter(|_, v| format!("t = {:.3} s\namp = {:.0}", v.x, v.y))
                 .show(ui, |plot_ui| {
+                    // Any user interaction drops out of live-follow.
+                    let resp = plot_ui.response();
+                    let interacted = resp.dragged()
+                        || (resp.hovered()
+                            && plot_ui.ctx().input(|i| {
+                                i.smooth_scroll_delta.y.abs() > 0.0
+                                    || (i.zoom_delta() - 1.0).abs() > f32::EPSILON
+                            }));
+                    if interacted {
+                        self.follow = false;
+                    }
+
+                    // X: live window when following, else the user's current X
+                    // (egui already applied this frame's drag/zoom). Y: always auto.
+                    let cur = plot_ui.plot_bounds();
+                    let (bx_min, bx_max) = if self.follow {
+                        (x_min, x_max)
+                    } else {
+                        clamp_view_to_history(cur.min()[0], cur.max()[0], self.t_s, HISTORY_S)
+                    };
                     plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                        [win_start, -self.y_scale],
-                        [now_s,      self.y_scale],
+                        [bx_min, -self.y_scale],
+                        [bx_max,  self.y_scale],
                     ));
+                    // Drives next frame's data query.
+                    self.last_x_range = (bx_min, bx_max);
+
+                    let raw_pts = Self::decimate_for_plot(&raw_vis, raw_mean);
+                    let hpf_pts = Self::decimate_for_plot(&hpf_vis, hpf_mean);
 
                     match self.audio_display {
                         AudioDisplay::Raw | AudioDisplay::Both => {
