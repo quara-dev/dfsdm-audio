@@ -265,9 +265,12 @@ impl DfsdmApp {
         }
     }
 
-    /// Extract the visible window from a ring buffer (time >= win_start).
-    fn visible_window(buf: &VecDeque<[f64; 2]>, win_start: f64) -> Vec<[f64; 2]> {
-        buf.iter().filter(|p| p[0] >= win_start).copied().collect()
+    /// Extract points whose time falls within the inclusive range [x_min, x_max].
+    fn visible_window_range(buf: &VecDeque<[f64; 2]>, x_min: f64, x_max: f64) -> Vec<[f64; 2]> {
+        buf.iter()
+            .filter(|p| p[0] >= x_min && p[0] <= x_max)
+            .copied()
+            .collect()
     }
 
     /// Min/max envelope decimation to TARGET_PLOT_PTS, mean-centred.
@@ -553,8 +556,8 @@ impl eframe::App for DfsdmApp {
         let now_s     = self.t_s.max(WINDOW_S);
         let win_start = now_s - WINDOW_S;
 
-        let raw_vis = Self::visible_window(&self.raw_buf, win_start);
-        let hpf_vis = Self::visible_window(&self.hpf_buf, win_start);
+        let raw_vis = Self::visible_window_range(&self.raw_buf, win_start, now_s);
+        let hpf_vis = Self::visible_window_range(&self.hpf_buf, win_start, now_s);
 
         // Compute means once; reused by update_y_scale AND decimate_for_plot.
         let raw_mean = Self::mean(&raw_vis);
@@ -668,5 +671,22 @@ mod tests {
     fn clamp_caps_width_to_available_span() {
         // span = 10, request width 100 -> full span [0,10]
         assert_eq!(clamp_view_to_history(0.0, 100.0, 10.0, 30.0), (0.0, 10.0));
+    }
+
+    fn buf_of(times: &[f64]) -> VecDeque<[f64; 2]> {
+        times.iter().map(|&t| [t, t * 10.0]).collect()
+    }
+
+    #[test]
+    fn range_window_includes_inclusive_endpoints() {
+        let buf = buf_of(&[0.0, 1.0, 2.0, 3.0, 4.0]);
+        let got = DfsdmApp::visible_window_range(&buf, 1.0, 3.0);
+        assert_eq!(got, vec![[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]);
+    }
+
+    #[test]
+    fn range_window_empty_when_outside() {
+        let buf = buf_of(&[0.0, 1.0, 2.0]);
+        assert!(DfsdmApp::visible_window_range(&buf, 5.0, 6.0).is_empty());
     }
 }
