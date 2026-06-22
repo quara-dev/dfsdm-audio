@@ -18,6 +18,34 @@ const TARGET_PLOT_PTS: usize = 3_000;
 // ── Ring buffer depth ──────────────────────────────────────────────────────
 const HISTORY_S: f64 = 30.0; // seconds of audio kept in RAM
 
+/// Clamp a requested view range to the data retained in the ring buffer.
+///
+/// - Never pans past `t_s` (no future).
+/// - Never pans before the oldest retained sample (`t_s - history_s`, floored at 0).
+/// - Caps the window width at the available span; preserves width otherwise.
+fn clamp_view_to_history(x_min: f64, x_max: f64, t_s: f64, history_s: f64) -> (f64, f64) {
+    let newest = t_s;
+    let oldest = (t_s - history_s).max(0.0);
+    let span   = (newest - oldest).max(1e-6);
+
+    let width = (x_max - x_min).max(1e-6).min(span);
+    let mut lo = x_min;
+    let mut hi = x_max;
+
+    if hi > newest {
+        hi = newest;
+        lo = hi - width;
+    }
+    if lo < oldest {
+        lo = oldest;
+        hi = lo + width;
+    }
+    if hi > newest {
+        hi = newest;
+    }
+    (lo, hi)
+}
+
 // ── Signal colours ─────────────────────────────────────────────────────────
 const COL_RAW: Color32 = Color32::from_rgb(0x00, 0xB4, 0xD8); // cyan-blue
 const COL_HPF: Color32 = Color32::from_rgb(0xFF, 0x6D, 0x00); // amber-orange
@@ -605,5 +633,40 @@ impl eframe::App for DfsdmApp {
         });
 
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_within_bounds_is_unchanged() {
+        // oldest = 0, newest = 10
+        assert_eq!(clamp_view_to_history(5.0, 8.0, 10.0, 30.0), (5.0, 8.0));
+    }
+
+    #[test]
+    fn clamp_rejects_future_pan() {
+        // width 3, newest 10 -> hi pinned to 10, width preserved
+        assert_eq!(clamp_view_to_history(9.0, 12.0, 10.0, 30.0), (7.0, 10.0));
+    }
+
+    #[test]
+    fn clamp_rejects_pan_before_history_floor() {
+        // t_s 100, history 30 -> oldest 70; width 3 preserved
+        assert_eq!(clamp_view_to_history(50.0, 53.0, 100.0, 30.0), (70.0, 73.0));
+    }
+
+    #[test]
+    fn clamp_floors_at_zero_early() {
+        // t_s 10 < history 30 -> oldest 0
+        assert_eq!(clamp_view_to_history(-5.0, -2.0, 10.0, 30.0), (0.0, 3.0));
+    }
+
+    #[test]
+    fn clamp_caps_width_to_available_span() {
+        // span = 10, request width 100 -> full span [0,10]
+        assert_eq!(clamp_view_to_history(0.0, 100.0, 10.0, 30.0), (0.0, 10.0));
     }
 }
