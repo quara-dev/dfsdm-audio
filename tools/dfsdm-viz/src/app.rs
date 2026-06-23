@@ -9,7 +9,7 @@ use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use crate::connection_manager::port_info_from;
 use crate::events::{AppEvent, ConnCmd, PortInfo};
 use crate::hpf::AudioHpFilter;
-use crate::toolbox::{self, ToolboxAlgo, ToolboxSignals, ToolboxSource, WINDOW_S};
+use crate::toolbox::{self, SplMode, ToolboxAlgo, ToolboxSignals, ToolboxSource, WINDOW_S, DBFS_TO_DBSPL};
 use crate::wav::WavRecorder;
 
 // ── Plot decimation ────────────────────────────────────────────────────────
@@ -105,6 +105,8 @@ pub struct DfsdmApp {
     toolbox_algos:     Vec<Box<dyn ToolboxAlgo>>,
     selected_algo_idx: usize,
     toolbox_source:    ToolboxSource,
+    /// Whether toolbox displays use acoustic calibration (dBSPL) or digital units (dBFS).
+    spl_mode:          SplMode,
 }
 
 impl DfsdmApp {
@@ -161,6 +163,7 @@ impl DfsdmApp {
             toolbox_algos:     toolbox::create_algos(),
             selected_algo_idx: 0,
             toolbox_source:    ToolboxSource::Hpf,
+            spl_mode:          SplMode::Digital,
         };
 
         // Auto-connect if a port was given on the CLI.
@@ -528,10 +531,15 @@ impl DfsdmApp {
                     .small(),
                 );
                 ui.separator();
-                ui.label(
-                    egui::RichText::new(format!("RMS {:.0}", self.rms_smooth))
-                        .color(rms_color),
-                );
+                let rms_label = match self.spl_mode {
+                    SplMode::Acoustic => {
+                        let dbfs = 20.0 * (self.rms_smooth as f64 / 32_767.0).max(1e-10).log10();
+                        let dbspl = dbfs + DBFS_TO_DBSPL;
+                        format!("RMS {:.1} dBSPL", dbspl)
+                    }
+                    SplMode::Digital => format!("RMS {:.0}", self.rms_smooth),
+                };
+                ui.label(egui::RichText::new(rms_label).color(rms_color));
                 ui.add(egui::ProgressBar::new(level.min(1.0)).desired_width(120.0));
             } else if let Some(ref err) = self.error_msg.clone() {
                 ui.colored_label(Color32::from_rgb(255, 80, 80), err);
@@ -549,11 +557,30 @@ impl DfsdmApp {
         win_start: f64,
         now_s:     f64,
     ) {
-        // Source selector
+        // Source selector + acoustic calibration toggle
         ui.horizontal(|ui| {
             ui.label("Source:");
             ui.selectable_value(&mut self.toolbox_source, ToolboxSource::Raw, "Raw");
             ui.selectable_value(&mut self.toolbox_source, ToolboxSource::Hpf, "HPF");
+            ui.separator();
+            let acoustic = self.spl_mode == SplMode::Acoustic;
+            let btn_text = if acoustic {
+                egui::RichText::new("dBSPL (IM69D130)").color(egui::Color32::from_rgb(0, 200, 140))
+            } else {
+                egui::RichText::new("dBSPL (IM69D130)")
+            };
+            if ui
+                .selectable_label(acoustic, btn_text)
+                .on_hover_text(
+                    "Toggle acoustic calibration (IM69D130 datasheet):\n\
+                     Sensitivity: −26 dBFS @ 94 dBSPL (1 kHz)\n\
+                     Offset: dBSPL = dBFS + 120\n\
+                     AOP: 120 dBSPL  |  Noise floor: ~25 dBSPL(A)"
+                )
+                .clicked()
+            {
+                self.spl_mode = if acoustic { SplMode::Digital } else { SplMode::Acoustic };
+            }
         });
         ui.separator();
 
@@ -581,6 +608,7 @@ impl DfsdmApp {
             x_min:       win_start,
             x_max:       now_s,
             source:      self.toolbox_source,
+            spl_mode:    self.spl_mode,
         };
 
         let idx = self.selected_algo_idx.min(self.toolbox_algos.len().saturating_sub(1));

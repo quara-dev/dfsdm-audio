@@ -5,7 +5,7 @@ use egui::Color32;
 use egui_plot::{Line, Plot, PlotPoints};
 use rustfft::{num_complex::Complex, FftPlanner};
 
-use super::{ToolboxAlgo, ToolboxSignals};
+use super::{SplMode, ToolboxAlgo, ToolboxSignals, DBFS_TO_DBSPL};
 
 pub struct Overview {
     log_freq: bool,
@@ -33,11 +33,19 @@ impl ToolboxAlgo for Overview {
             return;
         }
 
-        let (freqs, psd_db) = welch_psd(&samples, signals.sample_rate);
+        let (freqs, psd_dbfs) = welch_psd(&samples, signals.sample_rate);
+
+        // Shift PSD to dBSPL if acoustic mode is active.
+        // For a power spectral density expressed in 10·log10 scale, the same
+        // additive offset (+120 dB) applies as for 20·log10 level values.
+        let psd_display: Vec<f64> = match signals.spl_mode {
+            SplMode::Acoustic => psd_dbfs.iter().map(|&v| v + DBFS_TO_DBSPL).collect(),
+            SplMode::Digital  => psd_dbfs.clone(),
+        };
 
         let pts: PlotPoints = freqs
             .iter()
-            .zip(psd_db.iter())
+            .zip(psd_display.iter())
             .skip(1) // skip DC bin
             .map(|(&f, &p)| {
                 let x = if self.log_freq { f.max(1.0).log10() } else { f };
@@ -46,11 +54,16 @@ impl ToolboxAlgo for Overview {
             .collect();
 
         let rms: f64 = (samples.iter().map(|&x| x * x).sum::<f64>() / samples.len() as f64).sqrt();
-        let rms_db   = 20.0 * (rms / 32_767.0).max(1e-10_f64).log10();
+        let rms_dbfs = 20.0 * (rms / 32_767.0).max(1e-10_f64).log10();
+        let rms_display = match signals.spl_mode {
+            SplMode::Acoustic => rms_dbfs + DBFS_TO_DBSPL,
+            SplMode::Digital  => rms_dbfs,
+        };
+        let unit = signals.level_label();
 
         Plot::new("overview_psd")
             .height(ui.available_height() - 24.0)
-            .y_axis_label("dBFS")
+            .y_axis_label(unit)
             .x_axis_label(if self.log_freq { "log₁₀(Hz)" } else { "Hz" })
             .show(ui, |plot_ui| {
                 plot_ui.line(
@@ -61,7 +74,7 @@ impl ToolboxAlgo for Overview {
             });
 
         ui.label(
-            egui::RichText::new(format!("Window RMS: {:.1} dBFS", rms_db))
+            egui::RichText::new(format!("Window RMS: {:.1} {}", rms_display, unit))
                 .small()
                 .color(Color32::GRAY),
         );

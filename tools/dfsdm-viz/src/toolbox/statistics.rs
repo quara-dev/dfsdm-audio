@@ -4,7 +4,7 @@ use eframe::egui;
 use egui::Color32;
 use rustfft::{num_complex::Complex, FftPlanner};
 
-use super::{ToolboxAlgo, ToolboxSignals};
+use super::{SplMode, ToolboxAlgo, ToolboxSignals, DBFS_TO_DBSPL};
 
 pub struct Statistics;
 
@@ -31,8 +31,9 @@ impl ToolboxAlgo for Statistics {
 
         let crest    = if rms > 0.0 { peak / rms }   else { 0.0 };
         let crest_db = if rms > 0.0 { 20.0 * crest.log10() } else { 0.0 };
-        let rms_db   = 20.0 * (rms  / 32_767.0).max(1e-10_f64).log10();
-        let peak_db  = 20.0 * (peak / 32_767.0).max(1e-10_f64).log10();
+
+        let rms_dbfs  = 20.0 * (rms  / 32_767.0).max(1e-10_f64).log10();
+        let peak_dbfs = 20.0 * (peak / 32_767.0).max(1e-10_f64).log10();
 
         let skewness = if std > 0.0 {
             samples.iter().map(|&x| ((x - mean) / std).powi(3)).sum::<f64>() / n as f64
@@ -43,6 +44,23 @@ impl ToolboxAlgo for Statistics {
 
         let dom_hz = dominant_frequency(&samples, signals.sample_rate);
 
+        // ── Format level values depending on SPL mode ───────────────────────
+        let (rms_str, peak_str) = match signals.spl_mode {
+            SplMode::Acoustic => {
+                let rms_spl  = rms_dbfs  + DBFS_TO_DBSPL;
+                let peak_spl = peak_dbfs + DBFS_TO_DBSPL;
+                (
+                    format!("{:.1} dBSPL  ({:.1} dBFS)", rms_spl,  rms_dbfs),
+                    format!("{:.1} dBSPL  ({:.1} dBFS)", peak_spl, peak_dbfs),
+                )
+            }
+            SplMode::Digital => (
+                format!("{:.1}  ({:.1} dBFS)", rms,  rms_dbfs),
+                format!("{:.0}  ({:.1} dBFS)", peak, peak_dbfs),
+            ),
+        };
+
+        // ── Grid ────────────────────────────────────────────────────────────
         egui::Grid::new("stats_grid")
             .num_columns(2)
             .spacing([12.0, 3.0])
@@ -57,14 +75,30 @@ impl ToolboxAlgo for Statistics {
                 }
                 row!("Signal",          signals.source.label().to_string());
                 row!("N (samples)",     format!("{}", n));
-                row!("Mean",            format!("{:.1}", mean));
-                row!("Std dev",         format!("{:.1}", std));
-                row!("RMS",             format!("{:.1}  ({:.1} dBFS)", rms,  rms_db));
-                row!("Peak",            format!("{:.0}  ({:.1} dBFS)", peak, peak_db));
+
+                if signals.is_acoustic() {
+                    row!("Mode", "IM69D130 Acoustic (dBSPL)".to_string());
+                }
+
+                row!("Mean (counts)",   format!("{:.1}", mean));
+                row!("Std dev (counts)",format!("{:.1}", std));
+                row!("RMS",             rms_str);
+                row!("Peak",            peak_str);
                 row!("Crest factor",    format!("{:.2}  ({:.1} dB)",  crest, crest_db));
                 row!("Skewness",        format!("{:.4}", skewness));
                 row!("Excess kurtosis", format!("{:.4}", kurtosis));
                 row!("Dominant freq",   format!("{:.1} Hz", dom_hz));
+
+                if signals.is_acoustic() {
+                    ui.end_row();
+                    ui.label(egui::RichText::new("─── IM69D130 Reference ───").weak());
+                    ui.label("");
+                    ui.end_row();
+                    row!("Sensitivity", "−26 dBFS @ 94 dBSPL (1 kHz)".to_string());
+                    row!("AOP",         "120 dBSPL (= 0 dBFS)".to_string());
+                    row!("Noise floor", "~25 dBSPL(A)  (−95 dBFS(A))".to_string());
+                    row!("Offset",      "dBSPL = dBFS + 120".to_string());
+                }
             });
 
         // Amplitude histogram
@@ -88,6 +122,7 @@ impl ToolboxAlgo for Statistics {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 2.0, Color32::from_rgb(20, 20, 30));
 
+        // X-axis tick labels: either in ADC counts or dBSPL
         let bar_w = rect.width() / N_BINS as f32;
         for (i, &count) in hist.iter().enumerate() {
             let bar_h = (count as f32 / hist_max) * rect.height();
@@ -100,6 +135,60 @@ impl ToolboxAlgo for Statistics {
                 ),
                 0.0,
                 Color32::from_rgb(0x00, 0xB4, 0xD8),
+            );
+        }
+
+        // Axis tick labels
+        let tick_positions: &[(usize, &str)] = if signals.is_acoustic() {
+            // Map rough dBSPL values back to bin indices:
+            // bin_centre_count = (bin_idx + 0.5) * bin_size - 32768
+            // dBFS = 20·log10(|count| / 32767);  dBSPL = dBFS + 120
+            // Mark a few round dBSPL values
+            &[
+                (0,  "25"),
+                (6,  "50"),
+                (12, "70"),
+                (18, "85"),
+                (24, "94"),  // calibration ref
+                (30, "100"),
+                (36, "110"),
+                (42, "115"),
+                (47, "120"),
+            ]
+        } else {
+            &[
+                (0,  "-∞"),
+                (12, "-40k"),
+                (24, "0"),
+                (36, "+20k"),
+                (47, "+32k"),
+            ]
+        };
+        for &(bin, label) in tick_positions {
+            let x = rect.left() + bin as f32 * bar_w + bar_w / 2.0;
+            painter.text(
+                egui::pos2(x, rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                label,
+                egui::FontId::proportional(8.0),
+                Color32::from_rgb(180, 180, 180),
+            );
+        }
+
+        if signals.is_acoustic() {
+            // Vertical marker at calibration reference (94 dBSPL)
+            let ref_bin = 24usize;
+            let ref_x   = rect.left() + ref_bin as f32 * bar_w + bar_w / 2.0;
+            painter.line_segment(
+                [egui::pos2(ref_x, rect.top()), egui::pos2(ref_x, rect.bottom())],
+                egui::Stroke::new(1.0, Color32::from_rgb(255, 180, 0)),
+            );
+            painter.text(
+                egui::pos2(ref_x + 2.0, rect.top() + 2.0),
+                egui::Align2::LEFT_TOP,
+                "94 dBSPL",
+                egui::FontId::proportional(8.0),
+                Color32::from_rgb(255, 180, 0),
             );
         }
     }

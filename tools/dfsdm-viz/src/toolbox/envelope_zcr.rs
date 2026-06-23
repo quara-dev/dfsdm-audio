@@ -2,7 +2,7 @@ use eframe::egui;
 use egui::Color32;
 use egui_plot::{Line, Plot, PlotPoints};
 
-use super::{ToolboxAlgo, ToolboxSignals};
+use super::{SplMode, ToolboxAlgo, ToolboxSignals, DBFS_TO_DBSPL};
 
 pub struct EnvelopeZcr {
     frame_ms:   f32,
@@ -40,7 +40,12 @@ impl ToolboxAlgo for EnvelopeZcr {
         let frame_len  = frame_len.max(16);
         let ms_per_sample = 1000.0 / signals.sample_rate;
 
-        let (env_pts, zcr_pts) = compute_envelope_zcr(&samples, frame_len, ms_per_sample);
+        let (env_pts, zcr_pts) = compute_envelope_zcr(
+            &samples,
+            frame_len,
+            ms_per_sample,
+            signals.spl_mode,
+        );
 
         let avail_h = ui.available_height();
         let (env_h, zcr_h) = if self.show_zcr {
@@ -49,10 +54,15 @@ impl ToolboxAlgo for EnvelopeZcr {
             (avail_h, 0.0)
         };
 
+        let env_label = match signals.spl_mode {
+            SplMode::Acoustic => "dBSPL",
+            SplMode::Digital  => "RMS (norm)",
+        };
+
         // --- RMS Envelope ---
         Plot::new("env_plot")
             .height(env_h)
-            .y_axis_label("RMS (norm)")
+            .y_axis_label(env_label)
             .x_axis_label("Time (ms)")
             .show(ui, |plot_ui| {
                 plot_ui.line(
@@ -83,6 +93,7 @@ fn compute_envelope_zcr(
     samples: &[f64],
     frame_len: usize,
     ms_per_sample: f64,
+    spl_mode: SplMode,
 ) -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
     let n = samples.len();
     let n_frames = n / frame_len;
@@ -93,9 +104,20 @@ fn compute_envelope_zcr(
         let start = f * frame_len;
         let frame = &samples[start..start + frame_len];
 
-        // RMS (normalised to full-scale)
-        let rms = (frame.iter().map(|&x| x * x).sum::<f64>() / frame_len as f64).sqrt()
-            / 32_767.0;
+        // RMS of this frame (in ADC counts)
+        let rms_counts =
+            (frame.iter().map(|&x| x * x).sum::<f64>() / frame_len as f64).sqrt();
+
+        // Y value depends on mode:
+        //   Digital:  normalised 0..1  (rms_counts / 32767)
+        //   Acoustic: dBSPL           (20·log10(rms/32767) + 120)
+        let env_y = match spl_mode {
+            SplMode::Digital  => rms_counts / 32_767.0,
+            SplMode::Acoustic => {
+                let dbfs = 20.0 * (rms_counts / 32_767.0).max(1e-10).log10();
+                dbfs + DBFS_TO_DBSPL
+            }
+        };
 
         // Zero-crossing rate: crossings per ms
         let mut zc = 0usize;
@@ -107,7 +129,7 @@ fn compute_envelope_zcr(
         let zcr_per_ms = zc as f64 / (frame_len as f64 * ms_per_sample);
 
         let t_ms = (start as f64 + frame_len as f64 / 2.0) * ms_per_sample;
-        env_pts.push([t_ms, rms]);
+        env_pts.push([t_ms, env_y]);
         zcr_pts.push([t_ms, zcr_per_ms]);
     }
 

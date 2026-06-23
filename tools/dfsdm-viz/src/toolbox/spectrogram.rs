@@ -4,17 +4,36 @@ use eframe::egui;
 use egui::Color32;
 use rustfft::{num_complex::Complex, FftPlanner};
 
-use super::{ToolboxAlgo, ToolboxSignals};
+use super::{SplMode, ToolboxAlgo, ToolboxSignals, DBFS_TO_DBSPL};
 
 pub struct Spectrogram {
     db_min:  f32,
     db_max:  f32,
     texture: Option<egui::TextureHandle>,
+    /// Track the SPL mode from the last frame so we can reset range defaults.
+    last_spl_mode: Option<SplMode>,
 }
 
 impl Spectrogram {
     pub fn new() -> Self {
-        Self { db_min: -60.0, db_max: 0.0, texture: None }
+        Self {
+            db_min: -60.0,
+            db_max: 0.0,
+            texture: None,
+            last_spl_mode: None,
+        }
+    }
+
+    /// Reset colour range defaults when the SPL mode changes.
+    fn sync_range_to_mode(&mut self, mode: SplMode) {
+        if self.last_spl_mode != Some(mode) {
+            match mode {
+                SplMode::Digital  => { self.db_min = -60.0; self.db_max =   0.0; }
+                // Acoustic: noise floor ~25 dBSPL, AOP 120 dBSPL
+                SplMode::Acoustic => { self.db_min =  25.0; self.db_max = 120.0; }
+            }
+            self.last_spl_mode = Some(mode);
+        }
     }
 }
 
@@ -22,12 +41,20 @@ impl ToolboxAlgo for Spectrogram {
     fn name(&self) -> &str { "Spectrogram" }
 
     fn draw(&mut self, ui: &mut egui::Ui, signals: &ToolboxSignals<'_>) {
+        self.sync_range_to_mode(signals.spl_mode);
+
+        let unit = signals.level_label();
+        let (range_min, range_max) = match signals.spl_mode {
+            SplMode::Digital  => (-120.0f32, -10.0f32),
+            SplMode::Acoustic => (  10.0f32, 120.0f32), // noise floor to AOP
+        };
+
         // Controls
         ui.horizontal(|ui| {
-            ui.label("dB min:");
-            ui.add(egui::DragValue::new(&mut self.db_min).speed(1.0).clamp_range(-120.0f32..=-10.0f32));
+            ui.label(format!("{} min:", unit));
+            ui.add(egui::DragValue::new(&mut self.db_min).speed(1.0).clamp_range(range_min..=range_max - 10.0));
             ui.label("max:");
-            ui.add(egui::DragValue::new(&mut self.db_max).speed(1.0).clamp_range(-40.0f32..=0.0f32));
+            ui.add(egui::DragValue::new(&mut self.db_max).speed(1.0).clamp_range(range_min + 10.0..=range_max));
             ui.separator();
             ui.label(format!("Signal: {}", signals.source.label()));
         });
@@ -39,7 +66,7 @@ impl ToolboxAlgo for Spectrogram {
         }
 
         // Target ~150 time columns; adjust hop accordingly.
-        let fft_size   = 256usize;
+        let fft_size    = 256usize;
         let target_cols = 150usize;
         let hop = (samples.len() / target_cols).max(fft_size / 4).max(1);
 
@@ -59,7 +86,12 @@ impl ToolboxAlgo for Spectrogram {
             let bin = n_rows - row; // row 0 → high freq bin, row n_rows-1 → low freq
             for frame in &stft {
                 let power = if bin < frame.len() { frame[bin] } else { 0.0 };
-                let db    = 10.0 * (power.max(1e-20_f64) / 32_767.0_f64.powi(2)).log10();
+                // Convert power (counts²) → dBFS then optionally to dBSPL
+                let db_raw = 10.0 * (power.max(1e-20_f64) / 32_767.0_f64.powi(2)).log10();
+                let db = match signals.spl_mode {
+                    SplMode::Acoustic => db_raw + DBFS_TO_DBSPL,
+                    SplMode::Digital  => db_raw,
+                };
                 let norm  = ((db - self.db_min as f64) / db_range).clamp(0.0, 1.0) as f32;
                 pixels.push(inferno(norm));
             }
@@ -105,6 +137,16 @@ impl ToolboxAlgo for Spectrogram {
                 Color32::WHITE,
             );
         }
+
+        // Colour-scale annotation (bottom-left corner)
+        let scale_text = format!("{} – {} {}", self.db_min as i32, self.db_max as i32, unit);
+        painter.text(
+            egui::pos2(panel_rect.left() + 4.0, panel_rect.bottom() - 12.0),
+            egui::Align2::LEFT_BOTTOM,
+            scale_text,
+            egui::FontId::proportional(9.0),
+            Color32::from_rgb(200, 200, 200),
+        );
     }
 }
 
